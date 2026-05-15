@@ -43,17 +43,26 @@ try {
     }
 } catch {}
 
-# ── 工具调用统计 ─────────────────────────────────────────────
+# ── 工具调用统计 + Transcript 解析 ──────────────────────────
 $toolTotal  = 0
 $toolRounds = 0
 $toolTop    = $null
+$lastAssistantTime = $null
+$runningAgents = @()
+$todos = @()
 try {
     $transcriptPath = $data.transcript_path
     if ($transcriptPath -and [System.IO.File]::Exists($transcriptPath)) {
         $toolCounts = @{}
+        $agentCalls = @{}  # id -> {name, desc, startTime}
+        $todoState = @{}   # id -> {subject, status}
         foreach ($line in [System.IO.File]::ReadAllLines($transcriptPath)) {
             try {
                 $obj = $line | ConvertFrom-Json
+                # 记录 assistant 消息时间戳
+                if ($obj.type -eq 'assistant' -and $obj.timestamp) {
+                    $lastAssistantTime = [DateTimeOffset]::Parse($obj.timestamp).UtcDateTime
+                }
                 if ($obj.type -eq 'assistant' -and $obj.message.role -eq 'assistant') {
                     $roundHasTool = $false
                     foreach ($c in $obj.message.content) {
@@ -62,9 +71,37 @@ try {
                             $toolTotal++
                             $n = $c.name
                             if ($toolCounts.ContainsKey($n)) { $toolCounts[$n]++ } else { $toolCounts[$n] = 1 }
+                            # Agent 追踪
+                            if ($n -eq 'Agent' -or $n -eq 'dispatch_agent') {
+                                $desc = if ($c.input.description) { $c.input.description } elseif ($c.input.prompt) { $c.input.prompt.Substring(0, [Math]::Min(30, $c.input.prompt.Length)) } else { '' }
+                                $agentCalls[$c.id] = @{ desc = $desc; startTime = $lastAssistantTime }
+                            }
+                            # TODO 追踪
+                            if ($n -eq 'TaskCreate' -or $n -eq 'TodoWrite') {
+                                $tid = if ($c.input.id) { $c.input.id } else { $c.id }
+                                $subj = if ($c.input.subject) { $c.input.subject } elseif ($c.input.content) { $c.input.content } else { '' }
+                                $todoState[$tid] = @{ subject = $subj; status = 'pending' }
+                            }
+                            if ($n -eq 'TaskUpdate' -or $n -eq 'TodoUpdate') {
+                                $tid = if ($c.input.taskId) { $c.input.taskId } elseif ($c.input.id) { $c.input.id } else { '' }
+                                if ($tid -and $c.input.status) {
+                                    if ($todoState.ContainsKey($tid)) { $todoState[$tid].status = $c.input.status }
+                                    else { $todoState[$tid] = @{ subject = ''; status = $c.input.status } }
+                                }
+                            }
                         }
                     }
                     if ($roundHasTool) { $toolRounds++ }
+                }
+                # tool_result 标记 agent 完成
+                if ($obj.type -eq 'result' -or ($obj.message -and $obj.message.role -eq 'user')) {
+                    if ($obj.message -and $obj.message.content) {
+                        foreach ($c in $obj.message.content) {
+                            if ($c.type -eq 'tool_result' -and $agentCalls.ContainsKey($c.tool_use_id)) {
+                                $agentCalls.Remove($c.tool_use_id)
+                            }
+                        }
+                    }
                 }
             } catch {}
         }
@@ -72,8 +109,19 @@ try {
             $top = $toolCounts.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1
             $toolTop = "$($top.Key):$($top.Value)"
         }
+        # 运行中的 agents
+        $runningAgents = @($agentCalls.Values)
+        # TODO 列表
+        $todos = @($todoState.Values)
     }
 } catch {}
+
+# ── Effort Level ───────────────────────────────────────────
+$effortLevel = $null
+if ($data.effort) {
+    if ($data.effort -is [string]) { $effortLevel = $data.effort }
+    elseif ($data.effort.level) { $effortLevel = $data.effort.level }
+}
 
 # ── 数值提取 ────────────────────────────────────────────────
 $pct    = [math]::Round($data.context_window.used_percentage, 1)
@@ -114,8 +162,30 @@ $costStr  = FormatCost $rawCost
 $durStr   = FormatDuration $durationMs
 $apiPct   = if ($durationMs -gt 0) { [math]::Round($apiDurMs * 100 / $durationMs) } else { 0 }
 $cacheHit = if ($inTk -gt 0) { [math]::Round($cacheR * 100 / $inTk) } else { 0 }
+$cacheTtlStr = $null
+$cacheTtlColor = $null
+if ($lastAssistantTime) {
+    $elapsed = ([DateTime]::UtcNow - $lastAssistantTime).TotalSeconds
+    $remaining = 300 - $elapsed
+    if ($remaining -gt 0) {
+        $min = [math]::Floor($remaining / 60); $sec = [math]::Floor($remaining % 60)
+        $cacheTtlStr = "${min}m${sec}s"
+        $cacheTtlColor = if ($remaining -gt 180) { "$esc[38;5;114m" } elseif ($remaining -gt 60) { "$esc[38;5;221m" } else { "$esc[38;5;210m" }
+    } else {
+        $cacheTtlStr = "expired"
+        $cacheTtlColor = "$esc[38;5;210m"
+    }
+}
 $toolStr  = if ($toolTop) { "${toolRounds}r/${toolTotal}c($toolTop)" } else { "${toolRounds}r/${toolTotal}c" }
 $gitStr   = if ($gitBranch) { $gitBranch } else { [char]0x2014 }
+
+# ── Rate Limit ─────────────────────────────────────────────
+$rl5h = $null; $rl7d = $null
+if ($data.rate_limits) {
+    if ($data.rate_limits.five_hour.used_percentage -ne $null) { $rl5h = [math]::Round($data.rate_limits.five_hour.used_percentage) }
+    if ($data.rate_limits.seven_day.used_percentage -ne $null) { $rl7d = [math]::Round($data.rate_limits.seven_day.used_percentage) }
+}
+function RlColor($v) { if ($v -gt 80) { "$esc[38;5;210m" } elseif ($v -gt 60) { "$esc[38;5;221m" } else { "$esc[38;5;114m" } }
 
 # ── 颜色定义 ────────────────────────────────────────────────
 $cModel  = "$esc[38;5;81m"
@@ -128,7 +198,11 @@ $cGit    = "$esc[38;5;114m"
 $cDur    = "$esc[38;5;245m"
 $cLines  = "$esc[38;5;150m"
 $cTool   = "$esc[38;5;216m"
+$cRl     = "$esc[38;5;117m"
+$cAgent  = "$esc[38;5;183m"
+$cTodo   = "$esc[38;5;114m"
 $cPct    = if ($pct -gt 80) { "$esc[38;5;210m" } elseif ($pct -gt 50) { "$esc[38;5;221m" } else { "$esc[38;5;114m" }
+$cEffort = switch ($effortLevel) { 'max' { "$esc[38;5;222m" } 'high' { "$esc[38;5;81m" } 'low' { "$esc[38;5;245m" } default { "$esc[38;5;245m" } }
 
 # ── 图标 ────────────────────────────────────────────────────
 $iModel  = [char]::ConvertFromUtf32(0x1F916)  # 🤖
@@ -141,22 +215,26 @@ $iDur    = [char]::ConvertFromUtf32(0x23F1)   # ⏱
 $iLines  = [char]::ConvertFromUtf32(0x270F)   # ✏
 $iTool   = [char]::ConvertFromUtf32(0x1F527)  # 🔧
 $iDir    = [char]::ConvertFromUtf32(0x1F4C1)  # 📁
+$iRl     = [char]::ConvertFromUtf32(0x1F6A6)  # 🚦
+$iAgent  = [char]::ConvertFromUtf32(0x1F47E)  # 👾
+$iTodo   = [char]::ConvertFromUtf32(0x2705)   # ✅
 
 # ── 组装两行 ────────────────────────────────────────────────
 $sep = "$cSep | $reset"
 
-# 第一行: 模型 | 上下文 | tokens | 缓存命中 | 费用
+# 第一行: 模型+effort | 上下文 | tokens | 缓存命中+TTL | 费用
+$modelStr = "$cModel$iModel $($data.model.display_name)$reset"
+if ($effortLevel) { $modelStr += " $cEffort$([char]0x26A1)$effortLevel$reset" }
 $row1Parts = @(
-    "$cModel$iModel $($data.model.display_name)$reset",
+    $modelStr,
     "$cPct$iCtx ${pct}% ($usedK/$(K $maxTk))$reset",
     "$cNum$iToken in:$(K $inTk) out:$(K $outTk)$reset",
-    "$cCache$iCache hit:${cacheHit}%$reset",
+    "$cCache$iCache hit:${cacheHit}%$(if ($cacheTtlStr) { " $cacheTtlColor$([char]0x23F3)$cacheTtlStr$reset" } else { '' })$reset",
     "$cCost$iCost $costStr$reset"
 )
 $line1 = $row1Parts -join $sep
 
 # 第二行: 工具 | 改动 | 时长 | git | 目录
-$nowStr = (Get-Date).ToString("HH:mm")
 $row2Parts = @(
     "$cTool$iTool $toolStr$reset",
     "$cLines$iLines +$linesAdded -$linesRem$reset",
@@ -168,3 +246,42 @@ $line2 = $row2Parts -join $sep
 
 Write-Output $line1
 Write-Output $line2
+
+# 第三行（动态）: [Rate Limit] | [Agent] | [TODO]
+$row3Parts = @()
+
+# Rate Limit
+if ($rl5h -ne $null) {
+    $rlStr = "$iRl $(RlColor $rl5h)5h:${rl5h}%$reset"
+    if ($rl7d -ne $null -and $rl7d -ge 50) { $rlStr += " $(RlColor $rl7d)7d:${rl7d}%$reset" }
+    $row3Parts += $rlStr
+}
+
+# Agent 状态
+if ($runningAgents.Count -gt 0) {
+    if ($runningAgents.Count -eq 1) {
+        $a = $runningAgents[0]
+        $adesc = if ($a.desc.Length -gt 20) { $a.desc.Substring(0,20) + '..' } else { $a.desc }
+        $aElapsed = if ($a.startTime) { $elapsed = ([DateTime]::UtcNow - $a.startTime).TotalSeconds; "$([math]::Round($elapsed))s" } else { '' }
+        $row3Parts += "$cAgent$iAgent $([char]0x25D0)$adesc$(if($aElapsed){"(${aElapsed})"})$reset"
+    } else {
+        $row3Parts += "$cAgent$iAgent $($runningAgents.Count)run$reset"
+    }
+}
+
+# TODO 进度
+if ($todos.Count -gt 0) {
+    $completed = @($todos | Where-Object { $_.status -eq 'completed' }).Count
+    $inProg = $todos | Where-Object { $_.status -eq 'in_progress' } | Select-Object -First 1
+    $todoDisp = if ($inProg -and $inProg.subject) {
+        $subj = if ($inProg.subject.Length -gt 15) { $inProg.subject.Substring(0,15) + '..' } else { $inProg.subject }
+        "$iTodo $([char]0x25B8)$subj ${completed}/$($todos.Count)"
+    } else {
+        "$iTodo ${completed}/$($todos.Count)"
+    }
+    $row3Parts += "$cTodo$todoDisp$reset"
+}
+
+if ($row3Parts.Count -gt 0) {
+    Write-Output ($row3Parts -join $sep)
+}
