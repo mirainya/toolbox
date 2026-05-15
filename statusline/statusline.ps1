@@ -49,6 +49,8 @@ $toolRounds = 0
 $toolTop    = $null
 $lastAssistantTime = $null
 $runningAgents = @()
+$totalAgents = 0
+$completedAgents = 0
 $todos = @()
 try {
     $transcriptPath = $data.transcript_path
@@ -56,6 +58,7 @@ try {
         $toolCounts = @{}
         $agentCalls = @{}  # id -> {name, desc, startTime}
         $todoState = @{}   # id -> {subject, status}
+        $todoCounter = 0
         foreach ($line in [System.IO.File]::ReadAllLines($transcriptPath)) {
             try {
                 $obj = $line | ConvertFrom-Json
@@ -73,20 +76,21 @@ try {
                             if ($toolCounts.ContainsKey($n)) { $toolCounts[$n]++ } else { $toolCounts[$n] = 1 }
                             # Agent 追踪
                             if ($n -eq 'Agent' -or $n -eq 'dispatch_agent') {
+                                $totalAgents++
                                 $desc = if ($c.input.description) { $c.input.description } elseif ($c.input.prompt) { $c.input.prompt.Substring(0, [Math]::Min(30, $c.input.prompt.Length)) } else { '' }
                                 $agentCalls[$c.id] = @{ desc = $desc; startTime = $lastAssistantTime }
                             }
                             # TODO 追踪
                             if ($n -eq 'TaskCreate' -or $n -eq 'TodoWrite') {
-                                $tid = if ($c.input.id) { $c.input.id } else { $c.id }
+                                $todoCounter++
+                                $tid = "$todoCounter"
                                 $subj = if ($c.input.subject) { $c.input.subject } elseif ($c.input.content) { $c.input.content } else { '' }
                                 $todoState[$tid] = @{ subject = $subj; status = 'pending' }
                             }
                             if ($n -eq 'TaskUpdate' -or $n -eq 'TodoUpdate') {
                                 $tid = if ($c.input.taskId) { $c.input.taskId } elseif ($c.input.id) { $c.input.id } else { '' }
-                                if ($tid -and $c.input.status) {
-                                    if ($todoState.ContainsKey($tid)) { $todoState[$tid].status = $c.input.status }
-                                    else { $todoState[$tid] = @{ subject = ''; status = $c.input.status } }
+                                if ($tid -and $c.input.status -and $todoState.ContainsKey($tid)) {
+                                    $todoState[$tid].status = $c.input.status
                                 }
                             }
                         }
@@ -99,6 +103,7 @@ try {
                         foreach ($c in $obj.message.content) {
                             if ($c.type -eq 'tool_result' -and $agentCalls.ContainsKey($c.tool_use_id)) {
                                 $agentCalls.Remove($c.tool_use_id)
+                                $completedAgents++
                             }
                         }
                     }
@@ -258,14 +263,17 @@ if ($rl5h -ne $null) {
 }
 
 # Agent 状态
-if ($runningAgents.Count -gt 0) {
-    if ($runningAgents.Count -eq 1) {
+if ($totalAgents -gt 0) {
+    $agentProgress = "$esc[38;5;245m[$completedAgents/$totalAgents]$reset"
+    if ($runningAgents.Count -eq 0) {
+        $row3Parts += "$cAgent$iAgent $([char]0x2713)done $agentProgress$reset"
+    } elseif ($runningAgents.Count -eq 1) {
         $a = $runningAgents[0]
         $adesc = if ($a.desc.Length -gt 20) { $a.desc.Substring(0,20) + '..' } else { $a.desc }
         $aElapsed = if ($a.startTime) { $elapsed = ([DateTime]::UtcNow - $a.startTime).TotalSeconds; "$([math]::Round($elapsed))s" } else { '' }
-        $row3Parts += "$cAgent$iAgent $([char]0x25D0)$adesc$(if($aElapsed){"(${aElapsed})"})$reset"
+        $row3Parts += "$cAgent$iAgent $([char]0x25D0)$adesc$(if($aElapsed){"(${aElapsed})"}) $agentProgress$reset"
     } else {
-        $row3Parts += "$cAgent$iAgent $($runningAgents.Count)run$reset"
+        $row3Parts += "$cAgent$iAgent $($runningAgents.Count)run $agentProgress$reset"
     }
 }
 
