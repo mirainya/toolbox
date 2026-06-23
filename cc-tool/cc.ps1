@@ -2,12 +2,14 @@
 # https://github.com/anthropics/claude-code
 #
 # Usage:
-#   cc              Interactive profile selector
-#   cc <name>       Launch claude with named profile
-#   cc list         List all profiles
-#   cc add <name>   Create a new profile
+#   cc                Interactive profile selector
+#   cc <name>         Launch claude with named profile
+#   cc <name> -Yolo   Launch with --dangerously-skip-permissions
+#   cc -Yolo          Interactive selector, then launch in YOLO mode
+#   cc list           List all profiles
+#   cc add <name>     Create a new profile
 #   cc remove <name>  Remove a profile
-#   cc help         Show help
+#   cc help           Show help
 
 function cc {
     param(
@@ -15,7 +17,9 @@ function cc {
         [string]$Command,
 
         [Parameter(Position = 1)]
-        [string]$Name
+        [string]$Name,
+
+        [switch]$Yolo
     )
 
     $ProfilesDir = "$HOME\.claude\profiles"
@@ -25,7 +29,7 @@ function cc {
     }
 
     if (-not $Command) {
-        _cc_interactive
+        _cc_interactive -Yolo:$Yolo
         return
     }
 
@@ -40,7 +44,7 @@ function cc {
             _cc_remove $Name
         }
         'help'   { _cc_help }
-        default  { _cc_launch $Command }
+        default  { _cc_launch $Command -Yolo:$Yolo }
     }
 }
 
@@ -48,6 +52,8 @@ function _cc_help {
     Write-Host ""
     Write-Host "  cc                Interactive profile selector" -ForegroundColor Cyan
     Write-Host "  cc <name>         Launch claude with named profile" -ForegroundColor Cyan
+    Write-Host "  cc <name> -Yolo   Launch with --dangerously-skip-permissions" -ForegroundColor Cyan
+    Write-Host "  cc -Yolo          Interactive selector, then launch in YOLO mode" -ForegroundColor Cyan
     Write-Host "  cc list           List all profiles" -ForegroundColor Cyan
     Write-Host "  cc add <name>     Create a new profile" -ForegroundColor Cyan
     Write-Host "  cc remove <name>  Remove a profile" -ForegroundColor Cyan
@@ -145,6 +151,8 @@ function _cc_remove {
 }
 
 function _cc_interactive {
+    param([switch]$Yolo)
+
     $profiles = @(_cc_get_profiles)
     if ($profiles.Count -eq 0) {
         Write-Host "`n  No profiles found. Use 'cc add <name>' to create one.`n" -ForegroundColor Yellow
@@ -169,8 +177,13 @@ function _cc_interactive {
         $index = [int]$choice - 1
         if ($index -ge 0 -and $index -lt $profiles.Count) {
             $selected = $profiles[$index]
-            Write-Host "`n  Launching claude with profile: $($selected.BaseName)`n" -ForegroundColor Cyan
-            claude --settings $selected.FullName
+            $yoloMsg = if ($Yolo) { " (YOLO)" } else { "" }
+            Write-Host "`n  Launching claude with profile: $($selected.BaseName)$yoloMsg`n" -ForegroundColor Cyan
+            if ($Yolo) {
+                claude --settings $selected.FullName --dangerously-skip-permissions
+            } else {
+                claude --settings $selected.FullName
+            }
             return
         }
     }
@@ -179,7 +192,10 @@ function _cc_interactive {
 }
 
 function _cc_launch {
-    param([string]$Name)
+    param(
+        [string]$Name,
+        [switch]$Yolo
+    )
 
     $ProfilesDir = "$HOME\.claude\profiles"
     $filePath = "$ProfilesDir\$Name.json"
@@ -190,6 +206,11 @@ function _cc_launch {
         return
     }
 
-    Write-Host "  Launching claude with profile: $Name" -ForegroundColor Cyan
-    claude --settings $filePath
+    $yoloMsg = if ($Yolo) { " (YOLO)" } else { "" }
+    Write-Host "  Launching claude with profile: $Name$yoloMsg" -ForegroundColor Cyan
+    if ($Yolo) {
+        claude --settings $filePath --dangerously-skip-permissions
+    } else {
+        claude --settings $filePath
+    }
 }

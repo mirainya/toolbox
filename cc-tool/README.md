@@ -58,6 +58,17 @@ cc
 cc myapi
 ```
 
+### YOLO 模式（跳过权限确认）
+
+加 `-Yolo` 开关启动时会带上 `--dangerously-skip-permissions`，跳过所有工具调用的逐个确认：
+
+```powershell
+cc myapi -Yolo     # 指定配置 + YOLO
+cc -Yolo           # 交互选单 + YOLO
+```
+
+> ⚠️ YOLO 模式下读写文件、执行命令都不再弹窗确认，请在可信目录中使用。
+
 ### 查看所有配置
 
 ```powershell
