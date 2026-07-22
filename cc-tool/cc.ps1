@@ -19,7 +19,10 @@ function cc {
         [Parameter(Position = 1)]
         [string]$Name,
 
-        [switch]$Yolo
+        [switch]$Yolo,
+
+        [Alias('c')]
+        [switch]$Continue
     )
 
     $ProfilesDir = "$HOME\.claude\profiles"
@@ -29,7 +32,7 @@ function cc {
     }
 
     if (-not $Command) {
-        _cc_interactive -Yolo:$Yolo
+        _cc_interactive -Yolo:$Yolo -Continue:$Continue
         return
     }
 
@@ -44,7 +47,7 @@ function cc {
             _cc_remove $Name
         }
         'help'   { _cc_help }
-        default  { _cc_launch $Command -Yolo:$Yolo }
+        default  { _cc_launch $Command -Yolo:$Yolo -Continue:$Continue }
     }
 }
 
@@ -53,11 +56,15 @@ function _cc_help {
     Write-Host "  cc                Interactive profile selector" -ForegroundColor Cyan
     Write-Host "  cc <name>         Launch claude with named profile" -ForegroundColor Cyan
     Write-Host "  cc <name> -Yolo   Launch with --dangerously-skip-permissions" -ForegroundColor Cyan
+    Write-Host "  cc <name> -c      Continue the most recent conversation" -ForegroundColor Cyan
     Write-Host "  cc -Yolo          Interactive selector, then launch in YOLO mode" -ForegroundColor Cyan
     Write-Host "  cc list           List all profiles" -ForegroundColor Cyan
     Write-Host "  cc add <name>     Create a new profile" -ForegroundColor Cyan
     Write-Host "  cc remove <name>  Remove a profile" -ForegroundColor Cyan
     Write-Host "  cc help           Show this help" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Flags can combine, e.g.  cc gaccode -c -Yolo" -ForegroundColor DarkGray
+    Write-Host "  Profiles with multiple models prompt for model selection." -ForegroundColor DarkGray
     Write-Host ""
 }
 
@@ -121,7 +128,13 @@ function _cc_add {
         return
     }
 
-    @{ env = @{ ANTHROPIC_AUTH_TOKEN = $token; ANTHROPIC_BASE_URL = $baseUrl } } |
+    $modelsRaw = Read-Host "  Models (comma-separated, optional)"
+    $models = @($modelsRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+    $profile = @{ env = @{ ANTHROPIC_AUTH_TOKEN = $token; ANTHROPIC_BASE_URL = $baseUrl } }
+    if ($models.Count -gt 0) { $profile.models = $models }
+
+    $profile |
         ConvertTo-Json -Depth 10 |
         Set-Content -Path $filePath -Encoding UTF8
 
@@ -150,8 +163,65 @@ function _cc_remove {
     Write-Host "  Profile '$Name' removed." -ForegroundColor Green
 }
 
+function _cc_select_model {
+    param([string]$FilePath)
+
+    $content = Get-Content $FilePath -Raw | ConvertFrom-Json
+    $models = @($content.models | Where-Object { $_ })
+
+    if ($models.Count -eq 0) { return $null }
+    if ($models.Count -eq 1) { return $models[0] }
+
+    Write-Host ""
+    Write-Host "  Select a model:" -ForegroundColor Cyan
+    Write-Host ""
+    for ($i = 0; $i -lt $models.Count; $i++) {
+        Write-Host "  [$($i + 1)] $($models[$i])" -ForegroundColor Green
+    }
+    Write-Host ""
+    $choice = (Read-Host "  Enter number (1-$($models.Count))").Trim()
+
+    if ($choice -match '^\d+$') {
+        $index = [int]$choice - 1
+        if ($index -ge 0 -and $index -lt $models.Count) {
+            return $models[$index]
+        }
+    }
+
+    Write-Host "  Invalid model selection, using profile default." -ForegroundColor Yellow
+    return $null
+}
+
+function _cc_run {
+    param(
+        [string]$FilePath,
+        [string]$Label,
+        [switch]$Yolo,
+        [switch]$Continue
+    )
+
+    $model = _cc_select_model $FilePath
+
+    $claudeArgs = @('--settings', $FilePath)
+    if ($Continue) { $claudeArgs += '--continue' }
+    if ($model)    { $claudeArgs += @('--model', $model) }
+    if ($Yolo)     { $claudeArgs += '--dangerously-skip-permissions' }
+
+    $tags = @()
+    if ($Continue) { $tags += 'continue' }
+    if ($model)    { $tags += "model: $model" }
+    if ($Yolo)     { $tags += 'YOLO' }
+    $suffix = if ($tags.Count -gt 0) { " ($($tags -join ', '))" } else { "" }
+
+    Write-Host "`n  Launching claude with profile: $Label$suffix`n" -ForegroundColor Cyan
+    claude @claudeArgs
+}
+
 function _cc_interactive {
-    param([switch]$Yolo)
+    param(
+        [switch]$Yolo,
+        [switch]$Continue
+    )
 
     $profiles = @(_cc_get_profiles)
     if ($profiles.Count -eq 0) {
@@ -177,13 +247,7 @@ function _cc_interactive {
         $index = [int]$choice - 1
         if ($index -ge 0 -and $index -lt $profiles.Count) {
             $selected = $profiles[$index]
-            $yoloMsg = if ($Yolo) { " (YOLO)" } else { "" }
-            Write-Host "`n  Launching claude with profile: $($selected.BaseName)$yoloMsg`n" -ForegroundColor Cyan
-            if ($Yolo) {
-                claude --settings $selected.FullName --dangerously-skip-permissions
-            } else {
-                claude --settings $selected.FullName
-            }
+            _cc_run $selected.FullName $selected.BaseName -Yolo:$Yolo -Continue:$Continue
             return
         }
     }
@@ -194,7 +258,8 @@ function _cc_interactive {
 function _cc_launch {
     param(
         [string]$Name,
-        [switch]$Yolo
+        [switch]$Yolo,
+        [switch]$Continue
     )
 
     $ProfilesDir = "$HOME\.claude\profiles"
@@ -206,11 +271,5 @@ function _cc_launch {
         return
     }
 
-    $yoloMsg = if ($Yolo) { " (YOLO)" } else { "" }
-    Write-Host "  Launching claude with profile: $Name$yoloMsg" -ForegroundColor Cyan
-    if ($Yolo) {
-        claude --settings $filePath --dangerously-skip-permissions
-    } else {
-        claude --settings $filePath
-    }
+    _cc_run $filePath $Name -Yolo:$Yolo -Continue:$Continue
 }
