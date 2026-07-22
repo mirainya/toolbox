@@ -128,6 +128,9 @@ if ($data.effort) {
     elseif ($data.effort.level) { $effortLevel = $data.effort.level }
 }
 
+# ── Fast Mode ──────────────────────────────────────────────
+$fastMode = ($data.fast_mode -eq $true)
+
 # ── 数值提取 ────────────────────────────────────────────────
 $pct    = [math]::Round($data.context_window.used_percentage, 1)
 $inTk   = $data.context_window.total_input_tokens
@@ -192,6 +195,13 @@ if ($data.rate_limits) {
 }
 function RlColor($v) { if ($v -gt 80) { "$esc[38;5;210m" } elseif ($v -gt 60) { "$esc[38;5;221m" } else { "$esc[38;5;114m" } }
 
+# ── Pull Request ───────────────────────────────────────────
+$prNum = $null; $prState = $null
+if ($data.pr -and $data.pr.number) {
+    $prNum = $data.pr.number
+    $prState = $data.pr.review_state
+}
+
 # ── 颜色定义 ────────────────────────────────────────────────
 $cModel  = "$esc[38;5;81m"
 $cNum    = "$esc[38;5;153m"
@@ -206,8 +216,10 @@ $cTool   = "$esc[38;5;216m"
 $cRl     = "$esc[38;5;117m"
 $cAgent  = "$esc[38;5;183m"
 $cTodo   = "$esc[38;5;114m"
+$cFast   = "$esc[38;5;209m"
+$cPr     = "$esc[38;5;111m"
 $cPct    = if ($pct -gt 80) { "$esc[38;5;210m" } elseif ($pct -gt 50) { "$esc[38;5;221m" } else { "$esc[38;5;114m" }
-$cEffort = switch ($effortLevel) { 'max' { "$esc[38;5;222m" } 'high' { "$esc[38;5;81m" } 'low' { "$esc[38;5;245m" } default { "$esc[38;5;245m" } }
+$cEffort = switch ($effortLevel) { 'max' { "$esc[38;5;222m" } 'xhigh' { "$esc[38;5;215m" } 'high' { "$esc[38;5;81m" } 'medium' { "$esc[38;5;153m" } 'low' { "$esc[38;5;245m" } default { "$esc[38;5;245m" } }
 
 # ── 图标 ────────────────────────────────────────────────────
 $iModel  = [char]::ConvertFromUtf32(0x1F916)  # 🤖
@@ -223,6 +235,19 @@ $iDir    = [char]::ConvertFromUtf32(0x1F4C1)  # 📁
 $iRl     = [char]::ConvertFromUtf32(0x1F6A6)  # 🚦
 $iAgent  = [char]::ConvertFromUtf32(0x1F47E)  # 👾
 $iTodo   = [char]::ConvertFromUtf32(0x2705)   # ✅
+$iFast   = [char]::ConvertFromUtf32(0x1F680)  # 🚀
+$iPr     = [char]::ConvertFromUtf32(0x1F500)  # 🔀
+
+# PR 评审状态 -> 图标+颜色
+function PrBadge($num, $state) {
+    $icon = switch ($state) {
+        'approved'          { "$esc[38;5;114m$([char]0x2713)" }   # ✓ 绿
+        'changes_requested' { "$esc[38;5;210m$([char]0x2717)" }   # ✗ 红
+        'draft'             { "$esc[38;5;245m$([char]0x270E)" }   # ✎ 灰
+        default             { "$esc[38;5;221m$([char]0x25CB)" }   # ○ 黄 (pending)
+    }
+    "$cPr$iPr#$num $icon$reset"
+}
 
 # ── 组装两行 ────────────────────────────────────────────────
 $sep = "$cSep | $reset"
@@ -230,6 +255,7 @@ $sep = "$cSep | $reset"
 # 第一行: 模型+effort | 上下文 | tokens | 缓存命中+TTL | 费用
 $modelStr = "$cModel$iModel $($data.model.display_name)$reset"
 if ($effortLevel) { $modelStr += " $cEffort$([char]0x26A1)$effortLevel$reset" }
+if ($fastMode)    { $modelStr += " $cFast$iFast$reset" }
 $row1Parts = @(
     $modelStr,
     "$cPct$iCtx ${pct}% ($usedK/$(K $maxTk))$reset",
@@ -240,11 +266,13 @@ $row1Parts = @(
 $line1 = $row1Parts -join $sep
 
 # 第二行: 工具 | 改动 | 时长 | git | 目录
+$gitPart = "$cGit$iGit $gitStr$reset"
+if ($prNum) { $gitPart += " $(PrBadge $prNum $prState)" }
 $row2Parts = @(
     "$cTool$iTool $toolStr$reset",
     "$cLines$iLines +$linesAdded -$linesRem$reset",
     "$cDur$iDur $durStr(API:${apiPct}%)$reset",
-    "$cGit$iGit $gitStr$reset",
+    $gitPart,
     "$cDir$iDir $currentDir$reset"
 )
 $line2 = $row2Parts -join $sep
